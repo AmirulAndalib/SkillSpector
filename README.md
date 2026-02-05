@@ -69,6 +69,10 @@ skillspector scan ./my-skill/ --format markdown --output report.md
 For the best results, provide an LLM API key for semantic analysis:
 
 ```bash
+# Using NVIDIA NIM (Recommended) - Single API key for all models
+export NVIDIA_API_KEY=nvapi-...
+skillspector scan ./my-skill/
+
 # Using Anthropic Claude
 export ANTHROPIC_API_KEY=sk-ant-...
 skillspector scan ./my-skill/
@@ -80,6 +84,8 @@ skillspector scan ./my-skill/
 # Skip LLM analysis (faster, static analysis only)
 skillspector scan ./my-skill/ --no-llm
 ```
+
+**NVIDIA NIM** is the recommended option for NVIDIA users - get your API key from [NVIDIA Inference Hub](https://inference.nvidia.com/). It provides access to multiple LLM models through a single API key.
 
 ## Vulnerability Patterns
 
@@ -191,9 +197,15 @@ Issues (2)
 
 | Variable | Description | Required |
 |----------|-------------|----------|
-| `ANTHROPIC_API_KEY` | Anthropic Claude API key | One of these |
-| `GOOGLE_API_KEY` | Google Gemini API key | required for LLM |
-| `SKILLSPECTOR_MODEL` | LLM model to use | Optional |
+| `NVIDIA_API_KEY` | NVIDIA NIM API key (recommended) | One of these |
+| `ANTHROPIC_API_KEY` | Anthropic Claude API key | required for |
+| `GOOGLE_API_KEY` | Google Gemini API key | LLM analysis |
+| `SKILLSPECTOR_MODEL` | LLM model to use (default varies by provider) | Optional |
+
+**Default models by provider:**
+- NVIDIA NIM: `meta/llama-3.3-70b-instruct`
+- Anthropic: `claude-3-5-sonnet-20241022`
+- Google: `gemini-pro`
 
 ### CLI Options
 

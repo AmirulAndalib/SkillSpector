@@ -1,7 +1,7 @@
 """
 LLM-based semantic analyzer for SkillSpector.
 
-Uses LLMs (Anthropic Claude or Google Gemini) to:
+Uses LLMs (NVIDIA NIM, Anthropic Claude, or Google Gemini) to:
 1. Filter false positives from static analysis
 2. Evaluate context and intent
 3. Provide human-readable explanations
@@ -106,21 +106,23 @@ class LLMAnalyzer:
         Initialize the LLM analyzer.
 
         Args:
-            provider: LLM provider ("anthropic" or "google"). Auto-detected if not specified.
+            provider: LLM provider ("nvidia", "anthropic", or "google"). Auto-detected if not specified.
         """
         self.provider = provider or self._detect_provider()
         self._client = None
 
     def _detect_provider(self) -> str:
         """Detect which LLM provider to use based on available API keys."""
-        if os.environ.get("ANTHROPIC_API_KEY"):
+        if os.environ.get("NVIDIA_API_KEY"):
+            return "nvidia"
+        elif os.environ.get("ANTHROPIC_API_KEY"):
             return "anthropic"
         elif os.environ.get("GOOGLE_API_KEY"):
             return "google"
         else:
             raise ValueError(
-                "No LLM API key found. Set ANTHROPIC_API_KEY or GOOGLE_API_KEY environment variable, "
-                "or use --no-llm for static analysis only."
+                "No LLM API key found. Set NVIDIA_API_KEY (recommended), ANTHROPIC_API_KEY, "
+                "or GOOGLE_API_KEY environment variable, or use --no-llm for static analysis only."
             )
 
     def analyze(
@@ -230,12 +232,32 @@ class LLMAnalyzer:
 
     def _call_llm(self, prompt: str) -> str:
         """Call the LLM API and return the response."""
-        if self.provider == "anthropic":
+        if self.provider == "nvidia":
+            return self._call_nvidia(prompt)
+        elif self.provider == "anthropic":
             return self._call_anthropic(prompt)
         elif self.provider == "google":
             return self._call_google(prompt)
         else:
             raise ValueError(f"Unknown provider: {self.provider}")
+
+    def _call_nvidia(self, prompt: str) -> str:
+        """Call NVIDIA NIM API (OpenAI-compatible)."""
+        from openai import OpenAI
+
+        client = OpenAI(
+            base_url="https://integrate.api.nvidia.com/v1",
+            api_key=os.environ.get("NVIDIA_API_KEY"),
+        )
+        model = os.environ.get("SKILLSPECTOR_MODEL", "meta/llama-3.3-70b-instruct")
+
+        response = client.chat.completions.create(
+            model=model,
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        return response.choices[0].message.content
 
     def _call_anthropic(self, prompt: str) -> str:
         """Call Anthropic Claude API."""
