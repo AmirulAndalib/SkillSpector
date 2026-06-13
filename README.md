@@ -49,7 +49,7 @@ make install-dev
 
 ### Docker (no Python required)
 
-Run SkillSpector without installing Python by pulling the pre-built image or building it locally from the included [Dockerfile](Dockerfile). The image is based on [Chainguard's minimal Python image](https://images.chainguard.dev/directory/image/python/versions), which has a near-zero CVE footprint.
+Run SkillSpector without installing Python by building it locally from the included [Dockerfile](Dockerfile). The image is based on the Docker Official Python `3.12-slim-bookworm` image.
 
 **Build the image:**
 

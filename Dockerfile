@@ -1,4 +1,4 @@
-FROM cgr.dev/chainguard/python:latest-dev AS builder
+FROM python:3.12-slim-bookworm AS builder
 
 WORKDIR /app
 COPY pyproject.toml README.md ./
@@ -6,7 +6,7 @@ COPY src/ src/
 RUN python -m venv .venv
 RUN .venv/bin/pip install --no-cache-dir .
 
-FROM cgr.dev/chainguard/python:latest
+FROM python:3.12-slim-bookworm
 
 COPY --from=builder /app/.venv /app/.venv
 
