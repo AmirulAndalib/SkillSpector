@@ -15,7 +15,7 @@
 
 """MCP rug-pull analyzer stub node."""
 
-# TODO(SADD B.3.3): Compare current vs previous manifest; emit RP1–RP3 when previous manifest available. See SADD for skillspector § B.3.3.
+# TODO: Compare current vs previous manifest; emit RP1–RP3 when a previous manifest is available.
 
 from __future__ import annotations
 
