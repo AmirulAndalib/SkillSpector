@@ -31,6 +31,80 @@ def _findings(content: str, path: str, module: object) -> set[str]:
     return {finding.rule_id for finding in static_runner.run_static_patterns(state, [module])}
 
 
+class _RecordingModule:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def analyze(self, *, content: str, file_path: str, file_type: str) -> list:
+        self.calls.append(content)
+        return []
+
+
+class TestCharacterLimit:
+    def test_char_gate_scans_at_limit_skips_above(self) -> None:
+        module = _RecordingModule()
+        limit = static_runner.MAX_FILE_CHARS
+
+        assert (
+            static_runner.run_static_patterns(
+                {"components": ["exact.txt"], "file_cache": {"exact.txt": "x" * limit}},
+                [module],
+            )
+            == []
+        )
+        assert len(module.calls) == 1
+
+        module.calls.clear()
+        assert (
+            static_runner.run_static_patterns(
+                {"components": ["over.txt"], "file_cache": {"over.txt": "x" * (limit + 1)}},
+                [module],
+            )
+            == []
+        )
+        assert module.calls == []
+
+    def test_multibyte_under_char_limit_scanned(self) -> None:
+        module = _RecordingModule()
+        content = "🦄" * 250_001
+        assert len(content) <= static_runner.MAX_FILE_CHARS
+        assert len(content.encode("utf-8")) > static_runner.MAX_FILE_CHARS
+
+        static_runner.run_static_patterns(
+            {"components": ["unicode.txt"], "file_cache": {"unicode.txt": content}},
+            [module],
+        )
+        assert module.calls == [content]
+
+    def test_oversized_file_does_not_stop_later_components(self) -> None:
+        module = _RecordingModule()
+        limit = static_runner.MAX_FILE_CHARS
+        state = {
+            "components": ["over.txt", "small.txt"],
+            "file_cache": {
+                "over.txt": "x" * (limit + 1),
+                "small.txt": "SAFE",
+            },
+        }
+
+        assert static_runner.run_static_patterns(state, [module]) == []
+        assert module.calls == ["SAFE"]
+
+    def test_skip_log_reports_char_metric(self, caplog) -> None:
+        caplog.set_level("DEBUG", logger="skillspector.nodes.analyzers.static_runner")
+        content = "x" * (static_runner.MAX_FILE_CHARS + 1)
+
+        static_runner.run_static_patterns(
+            {"components": ["over.txt"], "file_cache": {"over.txt": content}},
+            [_RecordingModule()],
+        )
+
+        message = " ".join(record.getMessage() for record in caplog.records)
+        assert "characters" in message
+        assert "MAX_FILE_CHARS" in message
+        assert "MAX_FILE_BYTES" not in message
+
+
 class TestSemanticStringDocumentationFiltering:
     """Governed lexical rules are filtered only in non-executable documentation contexts."""
 

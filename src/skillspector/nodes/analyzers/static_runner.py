@@ -48,7 +48,7 @@ FILE_TYPES: dict[str, str] = {
     ".rs": "rust",
 }
 
-MAX_FILE_BYTES = 1_000_000
+MAX_FILE_CHARS = 1_000_000
 _EVAL_DATASET_FILES = {
     "evals/evals.json",
     "evals/evals.jsonl",
@@ -272,12 +272,12 @@ def run_static_patterns(
         if content is None:
             logger.debug("Skipping %s: no content in file_cache", path)
             continue
-        if len(content) > MAX_FILE_BYTES:
+        if len(content) > MAX_FILE_CHARS:
             logger.debug(
-                "Skipping %s: size %d exceeds MAX_FILE_BYTES (%d)",
+                "Skipping %s: size %d characters exceeds MAX_FILE_CHARS (%d)",
                 path,
                 len(content),
-                MAX_FILE_BYTES,
+                MAX_FILE_CHARS,
             )
             continue
         if _is_binary_file(path, content):

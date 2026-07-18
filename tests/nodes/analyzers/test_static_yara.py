@@ -27,7 +27,7 @@ from pathlib import Path
 import pytest
 
 from skillspector.nodes.analyzers import static_yara
-from skillspector.nodes.analyzers.static_runner import MAX_FILE_BYTES
+from skillspector.nodes.analyzers.static_runner import MAX_FILE_CHARS
 
 
 @pytest.fixture(autouse=True)
@@ -270,9 +270,43 @@ class TestEdgeCases:
         _write_rule(
             tmp_path, "rule_big", category="malware", severity="HIGH", strings={"a": "BIGMARKER"}
         )
-        content = "BIGMARKER" + ("x" * MAX_FILE_BYTES)
+        content = "BIGMARKER" + ("x" * MAX_FILE_CHARS)
         findings = _run(content, "big.txt", str(tmp_path))
         assert findings == []
+
+    def test_exact_character_limit_scanned(self, tmp_path):
+        _write_rule(
+            tmp_path, "rule_exact", category="malware", severity="HIGH", strings={"a": "EXACT"}
+        )
+        content = "EXACT" + ("x" * (MAX_FILE_CHARS - len("EXACT")))
+        findings = _run(content, "exact.txt", str(tmp_path))
+        assert _has_rule(findings, "rule_exact")
+
+    def test_multibyte_under_char_limit_scanned(self, tmp_path):
+        _write_rule(
+            tmp_path, "rule_unicode", category="malware", severity="HIGH", strings={"a": "UNICODE"}
+        )
+        content = "UNICODE" + ("🦄" * 250_000)
+        assert len(content) <= MAX_FILE_CHARS
+        assert len(content.encode("utf-8")) > MAX_FILE_CHARS
+        assert _has_rule(_run(content, "unicode.txt", str(tmp_path)), "rule_unicode")
+
+    def test_oversized_file_does_not_stop_later_components(self, tmp_path):
+        _write_rule(
+            tmp_path, "rule_small", category="malware", severity="HIGH", strings={"a": "SMALL"}
+        )
+        state = {
+            "components": ["big.txt", "small.txt"],
+            "file_cache": {
+                "big.txt": "BIGMARKER" + ("x" * MAX_FILE_CHARS),
+                "small.txt": "SMALL",
+            },
+            "yara_rules_dir": str(tmp_path),
+        }
+
+        findings = static_yara.node(state)["findings"]
+        assert _has_rule(findings, "rule_small")
+        assert {f.file for f in findings} == {"small.txt"}
 
     def test_nonexistent_rules_dir_returns_empty(self):
         state = {
