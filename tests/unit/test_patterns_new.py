@@ -250,11 +250,140 @@ class TestOutputHandling:
         assert len(oh1) >= 1
         assert all(f.confidence >= 0.9 for f in oh1)
 
-    def test_capture_output_keyword_is_not_model_output(self) -> None:
-        content = (
-            "result = subprocess.run(\n    argv,\n    capture_output=True,\n    text=True,\n)\n"
-        )
+    @pytest.mark.parametrize(
+        "content",
+        [
+            pytest.param(
+                "result = subprocess.run(\n"
+                "    argv,\n"
+                "    capture_output=True,\n"
+                "    text=True,\n"
+                ")\n",
+                id="capture_output_keyword",
+            ),
+            pytest.param(
+                "completed = subprocess.run(\n"
+                '    [isaac_ros, "status", "--output", "json"],\n'
+                "    check=True,\n"
+                "    capture_output=True,\n"
+                "    text=True,\n"
+                ")\n"
+                "payload = json.loads(completed.stdout)\n",
+                id="literal_output_cli_flag",
+            ),
+            pytest.param(
+                'subprocess.run(["tool", "result", str(output_path)])',
+                id="literal_and_nonmatching_identifier",
+            ),
+            pytest.param(
+                "subprocess.run(args=argv, capture_output=True)",
+                id="safe_keyword_args",
+            ),
+        ],
+    )
+    def test_subprocess_metadata_is_not_model_output(self, content: str) -> None:
         assert not any(f.rule_id == "OH1" for f in oh_mod.analyze(content, "runner.py", "python"))
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            pytest.param(
+                'subprocess.run(["sh", "-c", output])',
+                id="nested_output_argument",
+            ),
+            pytest.param(
+                "import subprocess as sp\nsp.run(response)",
+                id="module_alias",
+            ),
+            pytest.param(
+                "from subprocess import run\nrun(args=completion)",
+                id="imported_call_keyword_args",
+            ),
+            pytest.param(
+                "subprocess.Popen(payload.answer)",
+                id="output_attribute",
+            ),
+            pytest.param("subprocess.run(reply)", id="reply_alias"),
+            pytest.param("subprocess.run(generated)", id="generated_alias"),
+            pytest.param(
+                "subprocess.getoutput(cmd=output)",
+                id="getoutput_cmd_keyword",
+            ),
+            pytest.param(
+                "subprocess.getstatusoutput(cmd=response)",
+                id="getstatusoutput_cmd_keyword",
+            ),
+            pytest.param(
+                'subprocess.run(["bash"], input=output, text=True)',
+                id="run_input_keyword",
+            ),
+            pytest.param(
+                'subprocess.Popen(["tool"], executable=generated)',
+                id="popen_executable_keyword",
+            ),
+            pytest.param(
+                'subprocess.check_output(["bash"], input=completion, text=True)',
+                id="check_output_input_keyword",
+            ),
+        ],
+    )
+    def test_subprocess_model_output_is_detected(self, content: str) -> None:
+        assert any(f.rule_id == "OH1" for f in oh_mod.analyze(content, "runner.py", "python"))
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            pytest.param("subprocess.run(output", id="single_line_partial_call"),
+            pytest.param(
+                "subprocess.run(\n    output\n)\nif incomplete:\n",
+                id="multiline_call_with_unrelated_syntax_error",
+            ),
+        ],
+    )
+    def test_malformed_python_uses_subprocess_fallback(self, content: str) -> None:
+        findings = oh_mod.analyze(content, "runner.py", "python")
+        assert any(f.rule_id == "OH1" for f in findings)
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            pytest.param("subprocess.getoutput(args=output)", id="getoutput_args_keyword"),
+            pytest.param(
+                "subprocess.getstatusoutput(args=response)",
+                id="getstatusoutput_args_keyword",
+            ),
+            pytest.param("subprocess.call(cmd=output)", id="call_cmd_keyword"),
+            pytest.param("subprocess.Popen(input=output)", id="popen_input_keyword"),
+            pytest.param("subprocess.check_call(input=output)", id="check_call_input_keyword"),
+        ],
+    )
+    def test_subprocess_unsupported_execution_keywords_are_not_detected(self, content: str) -> None:
+        assert not any(f.rule_id == "OH1" for f in oh_mod.analyze(content, "runner.py", "python"))
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            pytest.param(
+                'subprocess.run(["tool", "--output",',
+                id="literal_output_cli_flag",
+            ),
+            pytest.param(
+                "subprocess.run(argv, capture_output=True,",
+                id="capture_output_keyword",
+            ),
+        ],
+    )
+    def test_malformed_python_subprocess_metadata_is_not_model_output(self, content: str) -> None:
+        assert not any(f.rule_id == "OH1" for f in oh_mod.analyze(content, "runner.py", "python"))
+
+    def test_embedded_python_subprocess_output_is_detected(self) -> None:
+        findings = oh_mod.analyze("subprocess.run(output)", "SKILL.md", "markdown")
+        assert any(f.rule_id == "OH1" for f in findings)
+
+    def test_multiline_embedded_python_subprocess_output_is_detected(self) -> None:
+        content = "```python\nsubprocess.run(\n    output\n)\n```"
+        findings = oh_mod.analyze(content, "SKILL.md", "markdown")
+        assert any(f.rule_id == "OH1" for f in findings)
 
     @pytest.mark.parametrize(
         "content",

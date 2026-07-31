@@ -30,6 +30,8 @@ SkillSpector helps you answer: **"Is this skill safe to install?"**
 
 ### Installation
 
+> **Open-source software notice:** This project will download and install additional third-party open source software projects. Review the license terms of these open source projects before use.
+
 Create and activate a virtual environment first (all `make` targets assume the venv is active). Use **uv** or **pip**; the Makefile uses `uv` if available, otherwise `pip`.
 
 **Quick install with uv (CLI-only):**

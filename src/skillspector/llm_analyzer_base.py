@@ -602,8 +602,6 @@ class LLMAnalyzerBase:
 
         The return type mirrors :meth:`run_batches`.
         """
-        if max_concurrency is None:
-            max_concurrency = resolve_max_concurrency()
         outcome = await self.arun_batches_detailed(
             batches, max_concurrency=max_concurrency, **kwargs
         )
@@ -614,10 +612,12 @@ class LLMAnalyzerBase:
         self,
         batches: list[Batch],
         *,
-        max_concurrency: int = DEFAULT_MAX_LLM_CONCURRENCY,
+        max_concurrency: int | None = None,
         **kwargs: object,
     ) -> BatchExecutionResult:
         """Execute batches concurrently and retain sanitized per-batch failures."""
+        if max_concurrency is None:
+            max_concurrency = resolve_max_concurrency()
         sem = asyncio.Semaphore(max_concurrency)
 
         async def _process(batch: Batch) -> tuple[Batch, list]:

@@ -1,9 +1,18 @@
+### 2.5.1 (Thursday, July 30, 2026)
+### Features/Bug Fixes
+* feat(llm): configurable analyzer fan-out concurrency via SKILLSPECTOR_MAX_LLM_CONCURRENCY (part of #303) (#305)
+* release: prepare package and skill lifecycle
+* fix(analyzer): avoid OH1 false positives for subprocess --output and capture_output
+* docs: clarify 2.5.0 execution accounting
+---
 ### 2.5.0 (Friday, July 24, 2026)
 ### Features/Bug Fixes
-* feat(report): add canonical inspection-ledger reporting, including JSON and SARIF execution-completeness status
-* fix(cli): make recursive child-scan failures fail the combined command and JSON report
-* fix(oss): exclude internal inspection-ledger plans and design documents from public snapshots
-
+* feat: Implement canonical inspection ledger reporting
+* fix(security): harden P6, PE3, and baseline fingerprints
+* fix(release): preserve GitHub PR titles in changelog
+* feat: publish GitHub releases from labeled PRs
+* docs: add skill-driven GitHub lifecycle
+---
 ### 2.4.4 (Thursday, July 23, 2026)
 ### Features/Bug Fixes
 * fix(anthropic): re-apply ANTHROPIC_BASE_URL override reverted by 2.4.3 snapshot (#301)
