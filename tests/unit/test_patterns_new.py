@@ -1391,6 +1391,148 @@ class TestSupplyChainHelpers:
         assert "numpy" in names
         assert "flask" in names
 
+    def test_pinned_version_only_accepts_exact_concrete_pins(self) -> None:
+        # A vulnerability lookup asks "is THIS release affected?", which is only meaningful
+        # when the manifest admits exactly one release. Everything else must yield None.
+        assert sc_mod._pinned_version("==", "2.31.0") == "2.31.0"
+        assert sc_mod._pinned_version("==", "1.*") is None  # wildcard equality
+        assert sc_mod._pinned_version("<=", "8.1.0") is None  # cap: admits every earlier
+        assert sc_mod._pinned_version("<", "8.1.0") is None
+        assert sc_mod._pinned_version(">=", "10.0.0") is None  # floor
+        assert sc_mod._pinned_version(">", "10.0.0") is None
+        assert sc_mod._pinned_version("~=", "1.26.0") is None  # compatible release
+        assert sc_mod._pinned_version("!=", "3.0.0") is None  # exclusion
+        assert sc_mod._pinned_version(None, None) is None  # bare dependency
+
+    def test_pinned_npm_version_rejects_ranges(self) -> None:
+        # npm defaults to caret ranges: stripping the operator turns a range into a concrete
+        # release the project may never install (regression: "^1.8.3" -> "1.8.3").
+        assert sc_mod._pinned_npm_version("4.17.21") == "4.17.21"
+        assert sc_mod._pinned_npm_version("1.2.3-rc.1") == "1.2.3-rc.1"
+        assert sc_mod._pinned_npm_version("^1.8.3") is None
+        assert sc_mod._pinned_npm_version("~4.18.0") is None
+        assert sc_mod._pinned_npm_version(">=1.2.3") is None
+        assert sc_mod._pinned_npm_version("1.x") is None
+        assert sc_mod._pinned_npm_version("*") is None
+        assert sc_mod._pinned_npm_version(">=1.2.3 <2.0.0") is None
+        assert sc_mod._pinned_npm_version("") is None
+
+    def test_extract_packages_requirements_specifier_is_not_a_pin(self) -> None:
+        # Regression: any specifier was treated as "==", so the floor "pillow>=10.0.0" was
+        # scanned as the exact release 10.0.0 and flagged with that release's CVEs.
+        content = (
+            "requests==2.31.0\n"  # exact pin  -> kept
+            "pillow>=10.0.0\n"  # floor      -> None
+            "click<=8.1.0\n"  # cap        -> None
+            "urllib3~=1.26.0\n"  # compatible -> None
+            "jinja2!=3.0.0\n"  # exclusion  -> None
+            "boto3==1.*\n"  # wildcard   -> None
+            "flask\n"  # unpinned   -> None
+        )
+        versions = {p[0]: p[1] for p in sc_mod._extract_packages_from_requirements(content)}
+        assert versions["requests"] == "2.31.0"
+        assert versions["pillow"] is None
+        assert versions["click"] is None
+        assert versions["urllib3"] is None
+        assert versions["jinja2"] is None
+        assert versions["boto3"] is None
+        assert versions["flask"] is None
+
+    def test_extract_packages_requirements_keeps_full_pep440_pins(self) -> None:
+        content = (
+            "pillow==10.0.0rc1\n"
+            "pillow-post==10.0.0.post1  # supported post-release pin\n"
+            "pillow-epoch==1!10.0\n"
+        )
+        versions = {p[0]: p[1] for p in sc_mod._extract_packages_from_requirements(content)}
+        assert versions == {
+            "pillow": "10.0.0rc1",
+            "pillow-post": "10.0.0.post1",
+            "pillow-epoch": "1!10.0",
+        }
+
+    def test_extract_packages_requirements_strips_pip_per_requirement_options(self) -> None:
+        content = """\
+requests==2.31.0 --hash=sha256:abc --config-settings=build-option=value
+urllib3==2.2.0 \\
+  --hash=sha256:def \\
+  --hash sha256:ghi
+certifi==2024.2.2 ; python_version >= "3.12" -C build-option=value
+packaging==24.0 --config-settings build-option=value
+idna==3.7 -Cbuild-option=value
+charset-normalizer==3.3.2 --config-settings="build-option=foo bar"
+tomli==2.0.1 --config-settings "build-option=foo bar"
+example-pkg==1.0 ; platform_release == "--rolling" --hash=sha256:jkl
+"""
+        assert sc_mod._extract_packages_from_requirements(content) == [
+            ("requests", "2.31.0", 1),
+            ("urllib3", "2.2.0", 2),
+            ("certifi", "2024.2.2", 5),
+            ("packaging", "24.0", 6),
+            ("idna", "3.7", 7),
+            ("charset-normalizer", "3.3.2", 8),
+            ("tomli", "2.0.1", 9),
+            ("example-pkg", "1.0", 10),
+        ]
+
+    def test_extract_packages_requirements_uses_pip_continuation_semantics(self) -> None:
+        content = """\
+pillow==10.0.\\
+0
+# comment \\
+requests==2.31.0
+idna==3.7\\
+# comment
+"""
+        assert sc_mod._extract_packages_from_requirements(content) == [
+            ("pillow", "10.0.0", 1),
+            ("requests", "2.31.0", 4),
+            ("idna", "3.7", 5),
+        ]
+
+    def test_extract_packages_pyproject_specifier_is_not_a_pin(self) -> None:
+        content = (
+            "[build-system]\n"
+            'requires = ["setuptools>=61", "wheel==0.42.0"]\n'
+            "[project]\n"
+            'dependencies = ["httpx<=0.27.0", "rich==13.*"]\n'
+        )
+        versions = {p[0]: p[1] for p in sc_mod._extract_packages_from_pyproject(content)}
+        assert versions["wheel"] == "0.42.0"
+        assert versions["setuptools"] is None
+        assert versions["httpx"] is None
+        assert versions["rich"] is None
+
+    def test_extract_packages_pyproject_keeps_full_pep440_pins(self) -> None:
+        content = (
+            "[project]\n"
+            'dependencies = ["pillow==10.0.0rc1", "pillow-post==10.0.0.post1", '
+            '"pillow-epoch==1!10.0"]\n'
+        )
+        versions = {p[0]: p[1] for p in sc_mod._extract_packages_from_pyproject(content)}
+        assert versions == {
+            "pillow": "10.0.0rc1",
+            "pillow-post": "10.0.0.post1",
+            "pillow-epoch": "1!10.0",
+        }
+
+    def test_extract_packages_package_json_caret_is_not_a_pin(self) -> None:
+        content = (
+            "{\n"
+            '  "dependencies": {\n'
+            '    "shell-quote": "^1.8.3",\n'
+            '    "lodash": "4.17.21",\n'
+            '    "semver": "~7.5.0",\n'
+            '    "glob": "*"\n'
+            "  }\n"
+            "}"
+        )
+        versions = {p[0]: p[1] for p in sc_mod._extract_packages_from_package_json(content)}
+        assert versions["lodash"] == "4.17.21"
+        assert versions["shell-quote"] is None
+        assert versions["semver"] is None
+        assert versions["glob"] is None
+
     def test_extract_packages_package_json(self) -> None:
         content = (
             '{\n  "dependencies": {\n    "express": "^4.18.0",\n    "lodash": "4.17.21"\n  }\n}'
@@ -1398,3 +1540,54 @@ class TestSupplyChainHelpers:
         names = [p[0] for p in sc_mod._extract_packages_from_package_json(content)]
         assert "express" in names
         assert "lodash" in names
+
+
+class TestSC4UnresolvedVersion:
+    """A name-only OSV query answers a different question than a version match."""
+
+    @staticmethod
+    def _vuln(severity: str = "CRITICAL"):
+        from skillspector.nodes.analyzers.osv_client import VulnResult
+
+        return VulnResult(
+            vuln_id="GHSA-xxxx-yyyy-zzzz",
+            summary="historical advisory",
+            severity=severity,
+            aliases=("CVE-2020-0001",),
+        )
+
+    def test_pinned_version_keeps_osv_severity(self) -> None:
+        from skillspector.models import Severity
+
+        with patch.object(sc_mod, "query_batch", return_value=[[self._vuln("CRITICAL")]]):
+            findings, covered = sc_mod._sc4_from_osv(
+                [("lodash", "4.17.20", 3)], "npm", "package.json", ["supply-chain"]
+            )
+        assert len(findings) == 1
+        assert findings[0].severity == Severity.CRITICAL
+        assert "lodash==4.17.20" in findings[0].message
+        assert covered == {"lodash"}
+
+    def test_unresolved_version_is_capped_and_reworded(self) -> None:
+        # "setuptools>=61" resolves to no version, so OSV is queried by name and returns the
+        # package's history. Reporting the worst of those as the finding's severity claims a
+        # vulnerability that the installed release may not have.
+        from skillspector.models import Severity
+
+        with patch.object(sc_mod, "query_batch", return_value=[[self._vuln("CRITICAL")]]):
+            findings, _ = sc_mod._sc4_from_osv(
+                [("setuptools", None, 2)], "PyPI", "pyproject.toml", ["supply-chain"]
+            )
+        assert len(findings) == 1
+        assert findings[0].severity == Severity.LOW
+        assert findings[0].confidence < 0.5
+        assert "does not pin a version" in findings[0].message
+        assert "==" not in findings[0].matched_text
+
+    def test_no_vulns_emits_nothing(self) -> None:
+        with patch.object(sc_mod, "query_batch", return_value=[[]]):
+            findings, covered = sc_mod._sc4_from_osv(
+                [("safe-pkg", None, 1)], "PyPI", "requirements.txt", ["supply-chain"]
+            )
+        assert findings == []
+        assert covered == set()
