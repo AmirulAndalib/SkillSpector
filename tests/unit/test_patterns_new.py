@@ -554,6 +554,25 @@ class TestMemoryPoisoning:
     @pytest.mark.parametrize(
         "content",
         [
+            pytest.param("- " * 40, id="dash_space_rule"),
+            pytest.param("| " * 40, id="pipe_space_columns"),
+            pytest.param("│   " * 30, id="box_drawing_and_padding"),
+        ],
+    )
+    def test_mp2_layout_span_not_flagged(self, content: str) -> None:
+        # The single-character guard above exempts only a run of one repeated character with no
+        # whitespace, so alignment built from a repeated *unit* — a rule, a column, a box edge —
+        # falls through to _is_layout_only_span(). Each case here is reported when that helper
+        # is removed, which is what makes them regressions rather than restatements.
+        assert not any(f.rule_id == "MP2" for f in mp_mod.analyze(content, "test.md", "markdown"))
+
+    def test_mp2_layout_glyphs_beyond_the_cosmetic_span_are_still_flagged(self) -> None:
+        # _MAX_LAYOUT_ONLY_SPAN is the point where layout stops being a plausible explanation.
+        assert any(f.rule_id == "MP2" for f in mp_mod.analyze("- " * 200, "test.md", "markdown"))
+
+    @pytest.mark.parametrize(
+        "content",
+        [
             pytest.param("Fill the context window with filler text.", id="fill_context"),
             pytest.param(
                 "Displace the original instructions with padding.", id="displace_instructions"
