@@ -62,6 +62,7 @@ _CATEGORY_MAP: dict[str, tuple[str, Severity]] = {
 _DEFAULT_RULE_ID = "YR4"
 _DEFAULT_SEVERITY = Severity.MEDIUM
 _DEFAULT_CONFIDENCE = 0.7
+_DESTRUCTIVE_AUTONOMY_NAMESPACE = "agent_skills"
 _DESTRUCTIVE_AUTONOMY_RULE = "agent_skill_destructive_autonomous_actions"
 _MAX_DESTRUCTIVE_AUTONOMY_LINE_DISTANCE = 3
 
@@ -71,14 +72,20 @@ _rules_hash: str | None = None
 
 
 def _collect_rule_files(*dirs: Path) -> list[Path]:
-    """Collect all YARA rule files under one or more directories, sorted for determinism."""
-    files: set[Path] = set()
+    """Collect YARA files deterministically while preserving directory precedence."""
+    files: list[Path] = []
+    seen: set[Path] = set()
     for d in dirs:
         if not d.is_dir():
             continue
+        directory_files: set[Path] = set()
         for ext in _RULE_EXTENSIONS:
-            files.update(d.rglob(ext))
-    return sorted(files)
+            directory_files.update(d.rglob(ext))
+        for rule_file in sorted(directory_files):
+            if rule_file not in seen:
+                seen.add(rule_file)
+                files.append(rule_file)
+    return files
 
 
 def _content_hash(rule_files: list[Path]) -> str:
@@ -278,7 +285,8 @@ def _match_file(rules: yara.Rules, content: str, file_path: str) -> list[Analyze
     findings: list[AnalyzerFinding] = []
     for match in matches:
         if (
-            match.rule == _DESTRUCTIVE_AUTONOMY_RULE
+            match.namespace == _DESTRUCTIVE_AUTONOMY_NAMESPACE
+            and match.rule == _DESTRUCTIVE_AUTONOMY_RULE
             and not _has_local_destructive_autonomy_evidence(match, data)
         ):
             logger.debug(
