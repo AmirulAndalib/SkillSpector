@@ -29,7 +29,7 @@ flowchart TD
     I --> Z{"Supported ZIP container?"}
     Z -->|yes| V["Bounded member inspection; preserve virtual paths"]
     Z -->|no| P
-    V --> P{"Selected file or inventoried SKILL.md / skill.md?"}
+    V --> P{"Selected file or in-profile SKILL.md / skill.md?"}
     P -->|yes| C{"Required-byte classification"}
     C -->|unsupported| F["Fatal unsupported_primary_content; retain raw bytes"]
     C -->|supported text| T["Ordinary text analysis"]
@@ -67,7 +67,9 @@ flowchart TD
 
 The arrows represent data and decisions, not execution of inspected instructions. Existing ZIP handling can extract a selected `.zip` or inspect nested/renamed ZIP members; the **unsupported-format header check itself never extracts or decompresses anything**. Optional LLM analysis is separate from this reconstruction; all validation described here explicitly disables live providers.
 
-The required-content boundary applies to the selected standalone filename and to inventoried basenames exactly `SKILL.md` or `skill.md`, including `pkg/SKILL.md` and `bundle.dat!/pkg/SKILL.md`. It does not depend on an archive's extension. An ordinary `image.png` remains governed by existing asset/reference policy. This is intentionally conservative: even an example named `SKILL.md` receives instruction-file treatment. It does not infer that every arbitrary binary file is a primary instruction.
+The required-content boundary applies to the selected standalone filename and to cached, in-profile basenames exactly `SKILL.md` or `skill.md`, including `pkg/SKILL.md` and `bundle.dat!/pkg/SKILL.md`. It does not depend on an archive's extension. An ordinary `image.png` remains governed by existing asset/reference policy. This is intentionally conservative: even an in-profile example named `SKILL.md` receives instruction-file treatment. It does not infer that every arbitrary binary file is a primary instruction.
+
+The exclusion audit can also inventory metadata for paths under generated/dependency or VCS directories such as `node_modules` and `.git`. That inventory does not make all of those bytes part of ordinary source analysis. Unreferenced, non-executable instructions under those policy exclusions retain the existing exclusion rules and can coexist with a complete result; this PR does not certify their interpretation. Explicitly selecting such an instruction file still makes it required. Excluded executable content and references have separate incompleteness rules. When required-content failure and excluded-executable evidence coexist, both ledger reasons must survive finalization.
 
 A recognized container is delegated to the existing bounded inspector; recognition is not certification of successful member inspection. Archive errors and limits remain ledger exceptions. Empty ZIPs can be complete under the existing profile: completeness does not require the presence of a usable skill or a particular manifest.
 
@@ -114,7 +116,7 @@ The examples below use static-only analysis, no baseline suppression, and benign
 |---|---|---|---|---|
 | Benign UTF-8 instructions | Ordinary analysis; no relevant exception | complete / true | 0 / 0 / 0 | true |
 | Explicit opaque file, UTF-16 primary, recognized unsupported archive, or invalid UTF-8 primary | `unsupported_primary_content`, source path, `fatal=true`; canonical bytes retained | failed / false | 2 / 2 / 2 | false |
-| Unsupported `SKILL.md` below directories or normal/renamed ZIPs | Same required-content event at real/virtual member path | failed / false | 2 / 2 / 2 | false |
+| Unsupported in-profile `SKILL.md` below directories or normal/renamed ZIPs | Same required-content event at real/virtual member path | failed / false | 2 / 2 / 2 | false |
 | Supported benign ZIP, including renamed or empty ZIP | Existing bounded archive inspection; incidental assets remain exclusions | complete / true | 0 / 0 / 0 | true |
 | Unreferenced incidental image beside benign instructions | `binary_content` in `scope_exclusions` | complete / true | 0 / 0 / 0 | true |
 | Referenced opaque image | Existing referenced-content limitation and AE1 finding | partial / true | 0 / 1 / 1 | false |
@@ -131,7 +133,7 @@ A subtlety is that component coverage can still read **100%** for AE6: analyzer 
 
 ## Review critique and remaining limits
 
-The initial root-only identity boundary was too narrow: parsing introduced member paths before the required-content check, so required status disappeared. Basename checks across inventoried paths repair that without promoting every asset. Applying this boundary before archive delegation would instead reject supported ZIPs wholesale. Applying it only after public-report generation would be too late to remove unsupported content from provider submission.
+The initial root-only identity boundary was too narrow: parsing introduced member paths before the required-content check, so required status disappeared. Basename checks across cached, in-profile paths repair that without promoting every asset or overriding the existing directory-exclusion policy. Applying this boundary before archive delegation would instead reject supported ZIPs wholesale. Applying it only after public-report generation would be too late to remove unsupported content from provider submission.
 
 The reconstruction boundary is deliberately narrow. Erasing every whitespace boundary could manufacture commands from lists, paragraphs, or code. Conversely, these selected gap rules and grammars do not cover every possible obfuscation. Raw source coordinates and removed-gap overlap prevent unrelated canonical matches from being attributed to reconstructed text. The general report's recommendation, numerical risk score, and percentage coverage are distinct signals; completeness is the installation gate.
 

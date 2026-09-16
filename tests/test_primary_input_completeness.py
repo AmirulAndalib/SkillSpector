@@ -103,6 +103,26 @@ async def test_passive_asset_keeps_existing_reference_policy(
         )
 
 
+async def test_primary_failure_preserves_excluded_executable_evidence(tmp_path: Path) -> None:
+    (tmp_path / "SKILL.md").write_bytes(_SKILL.decode().encode("utf-16"))
+    excluded = tmp_path / "node_modules" / "example"
+    excluded.mkdir(parents=True)
+    (excluded / "worker.py").write_text("print('inert example')\n", encoding="utf-8")
+
+    result = await run_scan(str(tmp_path), use_llm=False)
+
+    completeness = result["analysis_completeness"]
+    assert completeness["status"] == "failed"
+    assert result["execution_successful"] is False
+    assert result["safe_to_install"] is False
+    exceptions = completeness["ledger_exceptions"]
+    assert any(
+        item["path"] == "SKILL.md" and item["reason_code"] == "unsupported_primary_content"
+        for item in exceptions
+    )
+    assert any(item["reason_code"] == "excluded_executable_content" for item in exceptions)
+
+
 @pytest.mark.parametrize("layout", ["flat", "nested", "empty", "renamed"])
 async def test_supported_zip_remains_complete(tmp_path: Path, layout: str) -> None:
     target = tmp_path / ("bundle.dat" if layout == "renamed" else "bundle.zip")
