@@ -661,6 +661,7 @@ class InputHandler:
     def __init__(self, transitive_budget: object | None = None) -> None:
         self._temp_dir: Path | None = None
         self._transitive_budget = transitive_budget
+        self.primary_file_path: str | None = None
 
     def resolve(self, input_path: str) -> tuple[Path, str]:
         """
@@ -680,6 +681,7 @@ class InputHandler:
             FileNotFoundError: If local path doesn't exist.
         """
         input_path = input_path.strip()
+        self.primary_file_path = None
 
         if self._is_git_url(input_path):
             return self._clone_git(input_path), "git"
@@ -1150,6 +1152,7 @@ class InputHandler:
             return self._extract_zip(zip_path)
         file_path = temp_dir / filename
         download_path.replace(file_path)
+        self.primary_file_path = filename
         return temp_dir
 
     def _download_transitive_file(self, url: str) -> Path:
@@ -1172,6 +1175,7 @@ class InputHandler:
             zip_path.write_bytes(content)
             return self._extract_zip(zip_path)
         (temp_dir / filename).write_bytes(content)
+        self.primary_file_path = filename
         return temp_dir
 
     def _download_with_redirect_validation(self, url: str) -> tuple[dict[str, str], str, bytes]:
@@ -1400,4 +1404,5 @@ class InputHandler:
             except BaseException:
                 dest.unlink(missing_ok=True)
                 raise
+        self.primary_file_path = file_path.name
         return temp_dir

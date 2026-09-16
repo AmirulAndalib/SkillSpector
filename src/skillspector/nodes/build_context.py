@@ -26,6 +26,7 @@ import binascii
 import json
 import os
 import re
+import tarfile
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from stat import S_ISREG
@@ -1725,6 +1726,37 @@ def _parse_manifest(
     return {}
 
 
+def _unsupported_primary_bytes(artifact: ArtifactRecord, data: bytes) -> bool:
+    """Recognize opaque primary content without opening or expanding containers.
+
+    ZIPs are handled separately by bounded nested inspection. Other archive
+    headers and UTF-16/32 instructions must not count as decoded source text,
+    even when their bytes happen to be valid UTF-8 (for example an ASCII TAR).
+    """
+    sample = data[:512]
+    try:
+        # Validates one fixed-size header (including its checksum), never
+        # enumerates members or expands compressed/archive contents.
+        tarfile.TarInfo.frombuf(sample, "utf-8", "surrogateescape")
+    except tarfile.HeaderError:
+        is_tar = False
+    else:
+        is_tar = True
+    is_bzip2 = (
+        sample.startswith(b"BZh")
+        and sample[3:4] in b"123456789"
+        and sample[4:10] in (b"1AY&SY", b"\x17rE8P\x90")
+    )
+    return (
+        artifact["content_kind"] != ContentKind.TEXT
+        or sample.startswith((b"\xff\xfe", b"\xfe\xff", b"\x00\x00\xfe\xff"))
+        or sample.startswith((b"\x1f\x8b", b"\xfd7zXZ\x00", b"7z\xbc\xaf\x27\x1c", b"Rar!\x1a\x07"))
+        or is_tar
+        or is_bzip2
+        or (bool(sample) and sample.count(b"\x00") > len(sample) // 4)
+    )
+
+
 def build_context(state: SkillspectorState) -> dict[str, object]:
     """Build flat ScanContext fields from state skill_path (local directory).
 
@@ -2047,6 +2079,37 @@ def build_context(state: SkillspectorState) -> dict[str, object]:
     inventory_by_path = {item["path"]: item for item in artifact_inventory}
 
     recognized_containers = frozenset(nested.outer_metadata)
+    primary_content_events: list[InspectionLedgerEvent] = []
+    required_paths = {"SKILL.md", "skill.md", state.get("primary_file_path")}
+    for artifact in artifact_inventory:
+        path = artifact["path"]
+        if path not in required_paths or path in recognized_containers:
+            continue
+        data = raw_file_cache.get(path)
+        if data is None or not _unsupported_primary_bytes(artifact, data):
+            continue
+        # Explicit input and primary instructions cannot be passive exclusions.
+        # Keep canonical bytes for byte-based analysis and source attribution,
+        # while making the missing interpretation fatal to a SAFE verdict.
+        artifact["content_kind"] = ContentKind.OPAQUE
+        artifact["disposition"] = ArtifactDisposition.FAILED
+        artifact["reason"] = LedgerReason.UNSUPPORTED_PRIMARY_CONTENT.value
+        llm_file_cache.pop(path, None)
+        primary_content_events.append(
+            ledger_event(
+                outcome=LedgerOutcome.FAILED,
+                record_type=LedgerRecordType.SYSTEM,
+                phase="cache",
+                path=path,
+                reason=LedgerReason.UNSUPPORTED_PRIMARY_CONTENT,
+            )
+        )
+        if path == primary_path:
+            reference_resolution["complete"] = False
+            reference_resolution["limitations"] = [
+                *cast(list[str], reference_resolution.get("limitations", [])),
+                LedgerReason.UNSUPPORTED_PRIMARY_CONTENT.value,
+            ]
     components = sorted(
         dict.fromkeys(
             [
@@ -2256,6 +2319,7 @@ def build_context(state: SkillspectorState) -> dict[str, object]:
                 *reference_events,
                 *cache_events,
                 *nested.ledger_events,
+                *primary_content_events,
                 *manifest_events,
                 *structured_events,
                 *postprocessing_events,
