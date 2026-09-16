@@ -28,6 +28,7 @@ import pytest
 from skillspector.input_handler import (
     ALLOWED_GIT_HOSTS,
     InputHandler,
+    _FileOpenError,
     _open_regular_file_from_windows_handle,
     _open_regular_file_no_follow,
 )
@@ -40,8 +41,13 @@ def _mock_windows_secure_open(
     handle: int = 1,
     attributes: int = 0,
     final_path: str | None = None,
+    long_names: dict[str, str] | None = None,
 ) -> None:
-    """Install a handle-level Windows open simulation on any platform."""
+    """Install a handle-level Windows open simulation on any platform.
+
+    ``long_names`` stands in for ``GetLongPathNameW``: it maps a path spelled
+    with an 8.3 short component to the long spelling the filesystem aliases.
+    """
 
     def get_file_information(_handle: int, information: object) -> bool:
         information._obj.dwFileAttributes = attributes  # type: ignore[attr-defined]
@@ -52,10 +58,16 @@ def _mock_windows_secure_open(
         buffer.value = opened_path  # type: ignore[attr-defined]
         return len(opened_path)
 
+    def get_long_path_name(path: str, buffer: object, _size: int) -> int:
+        expanded = (long_names or {}).get(path, path)
+        buffer.value = expanded  # type: ignore[attr-defined]
+        return len(expanded)
+
     kernel32 = SimpleNamespace(
         CreateFileW=lambda *_args: handle,
         GetFileInformationByHandle=get_file_information,
         GetFinalPathNameByHandleW=get_final_path,
+        GetLongPathNameW=get_long_path_name,
         CloseHandle=lambda _handle: True,
     )
     msvcrt = SimpleNamespace(open_osfhandle=lambda _handle, _flags: os.open(source, os.O_RDONLY))
@@ -225,8 +237,18 @@ def test_resolve_file_open_failure_does_not_create_temp_dir(tmp_path: Path) -> N
     source = tmp_path / "SKILL.md"
     source.write_text("# Skill", encoding="utf-8")
     handler = InputHandler()
+    denied = OSError("denied")
     try:
-        with patch("skillspector.input_handler.os.open", side_effect=OSError("denied")):
+        # The secure open dispatches on the platform: POSIX goes through os.open,
+        # Windows through the handle-based helper. Deny both so the failure is
+        # injected wherever the test happens to run.
+        with (
+            patch("skillspector.input_handler.os.open", side_effect=denied),
+            patch(
+                "skillspector.input_handler._open_regular_file_from_windows_handle",
+                side_effect=_FileOpenError(source, denied),
+            ),
+        ):
             with pytest.raises(ValueError, match="Could not safely open"):
                 handler.resolve(str(source))
         assert handler.temp_dir_for_cleanup() is None
@@ -305,6 +327,37 @@ def test_windows_no_follow_open_rejects_reparse_point(
 
     with pytest.raises(ValueError, match="Could not safely open"):
         _open_regular_file_from_windows_handle(source)
+
+
+def test_windows_no_follow_open_accepts_a_short_dos_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A path spelled with an 8.3 short component opens the entry it aliases."""
+    source = tmp_path / "SKILL.md"
+    source.write_text("# Skill", encoding="utf-8")
+    short = tmp_path / "SHORTN~1.MD"
+    _mock_windows_secure_open(
+        monkeypatch,
+        source,
+        final_path=str(source),
+        long_names={str(short): str(source)},
+    )
+
+    with _open_regular_file_from_windows_handle(short) as opened:
+        assert opened.read() == b"# Skill"
+
+
+def test_windows_no_follow_open_rejects_an_unresolvable_short_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A short name that no longer expands leaves the comparison fail-closed."""
+    source = tmp_path / "SKILL.md"
+    source.write_text("# Skill", encoding="utf-8")
+    short = tmp_path / "SHORTN~1.MD"
+    _mock_windows_secure_open(monkeypatch, source, final_path=str(source))
+
+    with pytest.raises(ValueError, match="Could not safely open"):
+        _open_regular_file_from_windows_handle(short)
 
 
 def test_windows_no_follow_open_rejects_canonical_path_mismatch(
