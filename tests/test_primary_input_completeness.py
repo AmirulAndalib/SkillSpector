@@ -103,11 +103,20 @@ async def test_passive_asset_keeps_existing_reference_policy(
         )
 
 
-async def test_primary_failure_preserves_excluded_executable_evidence(tmp_path: Path) -> None:
+@pytest.mark.parametrize("nested_archive", [False, True])
+async def test_primary_failure_preserves_excluded_executable_evidence(
+    tmp_path: Path, nested_archive: bool
+) -> None:
     (tmp_path / "SKILL.md").write_bytes(_SKILL.decode().encode("utf-16"))
     excluded = tmp_path / "node_modules" / "example"
     excluded.mkdir(parents=True)
-    (excluded / "worker.py").write_text("print('inert example')\n", encoding="utf-8")
+    if nested_archive:
+        with zipfile.ZipFile(excluded / "bundle.zip", "w") as archive:
+            archive.writestr("worker.py", "print('inert example')\n")
+        executable_path = "node_modules/example/bundle.zip!/worker.py"
+    else:
+        (excluded / "worker.py").write_text("print('inert example')\n", encoding="utf-8")
+        executable_path = "node_modules/example/worker.py"
 
     result = await run_scan(str(tmp_path), use_llm=False)
 
@@ -120,7 +129,10 @@ async def test_primary_failure_preserves_excluded_executable_evidence(tmp_path: 
         item["path"] == "SKILL.md" and item["reason_code"] == "unsupported_primary_content"
         for item in exceptions
     )
-    assert any(item["reason_code"] == "excluded_executable_content" for item in exceptions)
+    assert any(
+        item["path"] == executable_path and item["reason_code"] == "excluded_executable_content"
+        for item in exceptions
+    )
 
 
 @pytest.mark.parametrize("layout", ["flat", "nested", "empty", "renamed"])
