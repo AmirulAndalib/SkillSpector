@@ -19,6 +19,7 @@ from skillspector.artifacts import (
     _concealed_instruction_run_spans,
     _contextual_default_ignorable_boundary_spans,
     _obfuscated_instruction_matches,
+    multiline_prompt_injection_view,
     prompt_injection_letter_spacing_view,
 )
 from skillspector.inspection_ledger import (
@@ -650,7 +651,7 @@ def _projected_prompt_injection_line(
         preserve_identifier_boundaries=False,
     )
     if view.source_offsets is None:
-        return None
+        return _multiline_prompt_injection_line(content, budget)
     first_offset: int | None = None
     identifier_relaxed_text = view.text.translate(_IDENTIFIER_RELAXATION)
     projected_texts = (
@@ -695,6 +696,44 @@ def _projected_prompt_injection_line(
                     source_offset = join_points[point_index][1]
                     if first_offset is None or source_offset < first_offset:
                         first_offset = source_offset
+    if first_offset is not None:
+        return get_line_number(content, first_offset)
+    return _multiline_prompt_injection_line(content, budget)
+
+
+def _multiline_prompt_injection_line(
+    content: str,
+    budget: _ArtifactIntegrityBudget,
+) -> int | None:
+    """Fail closed for prompt-shaped singleton lines without flattening prose."""
+    view = multiline_prompt_injection_view(content, budget.check_runtime)
+    if view.source_offsets is None:
+        return None
+    first_offset: int | None = None
+    for pattern in _PROJECTED_PROMPT_PATTERNS:
+        budget.check_runtime()
+        reconstruction_index = 0
+        for match in pattern.finditer(view.text):
+            budget.check_runtime()
+            # Matches and reconstruction spans are both ordered. Advance once
+            # per span instead of scanning every reconstruction for every
+            # match, including ordinary matches before a spaced instruction.
+            while (
+                reconstruction_index < len(view.reconstructions)
+                and view.reconstructions[reconstruction_index].derived_end <= match.start() + 1
+            ):
+                budget.check_runtime()
+                reconstruction_index += 1
+            if reconstruction_index == len(view.reconstructions):
+                break
+            reconstruction = view.reconstructions[reconstruction_index]
+            right = max(match.start() + 1, reconstruction.derived_start + 1)
+            if right < min(match.end(), reconstruction.derived_end):
+                source_offset = view.source_offset(right - 1) + 1
+                if first_offset is None or source_offset < first_offset:
+                    first_offset = source_offset
+                # Later matches cannot precede this pattern's first gap.
+                break
     return get_line_number(content, first_offset) if first_offset is not None else None
 
 
