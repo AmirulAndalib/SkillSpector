@@ -1733,6 +1733,14 @@ def _unsupported_primary_bytes(artifact: ArtifactRecord, data: bytes) -> bool:
     headers and UTF-16/32 instructions must not count as decoded source text,
     even when their bytes happen to be valid UTF-8 (for example an ASCII TAR).
     """
+    split_utf8 = False
+    if not artifact["decodable"] and artifact["size_bytes"] > len(data):
+        # Only an unfinished trailing code point is explained by truncation.
+        # An invalid sequence earlier in the cached prefix is still unsupported.
+        try:
+            data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            split_utf8 = exc.reason == "unexpected end of data"
     sample = data[:512]
     try:
         # Validates one fixed-size header (including its checksum), never
@@ -1748,7 +1756,11 @@ def _unsupported_primary_bytes(artifact: ArtifactRecord, data: bytes) -> bool:
         and sample[4:10] in (b"1AY&SY", b"\x17rE8P\x90")
     )
     return (
-        artifact["content_kind"] != ContentKind.TEXT
+        (artifact["content_kind"] != ContentKind.TEXT and not split_utf8)
+        # A bounded prefix can split a valid UTF-8 code point. Existing size
+        # accounting already marks that scan partial; it is not proof that the
+        # complete source uses an unsupported encoding.
+        or (not artifact["decodable"] and not split_utf8)
         or sample.startswith((b"\xff\xfe", b"\xfe\xff", b"\x00\x00\xfe\xff"))
         or sample.startswith((b"\x1f\x8b", b"\xfd7zXZ\x00", b"7z\xbc\xaf\x27\x1c", b"Rar!\x1a\x07"))
         or is_tar
@@ -2080,10 +2092,17 @@ def build_context(state: SkillspectorState) -> dict[str, object]:
 
     recognized_containers = frozenset(nested.outer_metadata)
     primary_content_events: list[InspectionLedgerEvent] = []
-    required_paths = {"SKILL.md", "skill.md", state.get("primary_file_path")}
+    selected_primary = state.get("primary_file_path")
     for artifact in artifact_inventory:
         path = artifact["path"]
-        if path not in required_paths or path in recognized_containers:
+        # A skill entry point retains its role below directory and virtual ZIP
+        # boundaries (e.g. bundle.dat!/pkg/SKILL.md). Renaming a supported ZIP
+        # must not turn its required instructions into a passive binary asset.
+        required = path == selected_primary or path.rsplit("/", 1)[-1] in {
+            "SKILL.md",
+            "skill.md",
+        }
+        if not required or path in recognized_containers:
             continue
         data = raw_file_cache.get(path)
         if data is None or not _unsupported_primary_bytes(artifact, data):

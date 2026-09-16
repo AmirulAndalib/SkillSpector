@@ -13,6 +13,8 @@ from collections import deque
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
+import regex  # type: ignore[import-untyped]
+
 from skillspector.artifacts import (
     ContentKind,
     SecurityTextView,
@@ -94,6 +96,18 @@ _MAX_IRREGULAR_SPACING_FRAGMENT_GAP = 2
 _IDENTIFIER_RELAXATION = str.maketrans({"_": " ", **{str(value): " " for value in range(10)}})
 _PROJECTED_PROMPT_PATTERNS = tuple(
     pattern for pattern, _confidence in (*COMPILED_P3_PATTERNS, *COMPILED_P4_PATTERNS)
+)
+# Removing line breaks can give the existing wildcard patterns a much longer
+# search space. Interrupt the regex itself, not just work between matches.
+_MULTILINE_PROMPT_PATTERN_SECONDS = 0.25
+_MULTILINE_PROMPT_PATTERNS = tuple(
+    regex.compile(pattern.pattern, regex.ASCII | regex.IGNORECASE | regex.MULTILINE)
+    for pattern in _PROJECTED_PROMPT_PATTERNS
+)
+_PROMPT_ASCII_CASE_ALIASES = {"\u0130": "i", "\u0131": "i", "\u017f": "s", "\u212a": "k"}
+_PROMPT_EXTRA_ASCII_WHITESPACE = "\x1c\x1d\x1e\x1f"
+_PROMPT_ASCII_WHITESPACE_TRANSLATION = str.maketrans(
+    dict.fromkeys(_PROMPT_EXTRA_ASCII_WHITESPACE, " ")
 )
 _LETTER_SPACING_PROMPT_ACTIONS = (
     "disclose",
@@ -701,6 +715,42 @@ def _projected_prompt_injection_line(
     return _multiline_prompt_injection_line(content, budget)
 
 
+def _multiline_prompt_matching_text(text: str, budget: _ArtifactIntegrityBudget) -> str:
+    """Preserve Python ``re`` semantics in the timeout engine's ASCII alphabet.
+
+    Current P3/P4 grammar has ASCII literals, word/space classes and wildcards;
+    neither ``0`` nor ``~`` is a literal. Keep one character per source character:
+    Python's word members become ``0``, whitespace becomes a space, and other
+    non-ASCII characters become ``~``. The four Unicode aliases of ASCII letters
+    under Python IGNORECASE retain their corresponding letters. Literal newlines
+    stay unchanged, so wildcard boundaries and every match offset are preserved.
+    This is only a matching alphabet, never a replacement source/evidence view.
+    """
+    budget.check_runtime()
+    if text.isascii():
+        if not any(character in text for character in _PROMPT_EXTRA_ASCII_WHITESPACE):
+            return text
+        return text.translate(_PROMPT_ASCII_WHITESPACE_TRANSLATION)
+
+    parts: list[str] = []
+    for start in range(0, len(text), _RUNTIME_CHECK_INTERVAL_CHARS):
+        budget.check_runtime()
+        characters: list[str] = []
+        for character in text[start : start + _RUNTIME_CHECK_INTERVAL_CHARS]:
+            if character in _PROMPT_EXTRA_ASCII_WHITESPACE:
+                characters.append(" ")
+            elif character.isascii():
+                characters.append(character)
+            elif character in _PROMPT_ASCII_CASE_ALIASES:
+                characters.append(_PROMPT_ASCII_CASE_ALIASES[character])
+            elif character.isspace():
+                characters.append(" ")
+            else:
+                characters.append("0" if character.isalnum() else "~")
+        parts.append("".join(characters))
+    return "".join(parts)
+
+
 def _multiline_prompt_injection_line(
     content: str,
     budget: _ArtifactIntegrityBudget,
@@ -709,31 +759,46 @@ def _multiline_prompt_injection_line(
     view = multiline_prompt_injection_view(content, budget.check_runtime)
     if view.source_offsets is None:
         return None
+    matching_text = _multiline_prompt_matching_text(view.text, budget)
     first_offset: int | None = None
-    for pattern in _PROJECTED_PROMPT_PATTERNS:
+    for pattern in _MULTILINE_PROMPT_PATTERNS:
         budget.check_runtime()
+        remaining = transitive_remaining_seconds(budget.state)
+        timeout = _MULTILINE_PROMPT_PATTERN_SECONDS
+        if remaining is not None:
+            timeout = min(timeout, max(0.0, remaining))
+        started_at = time.monotonic()
         reconstruction_index = 0
-        for match in pattern.finditer(view.text):
-            budget.check_runtime()
-            # Matches and reconstruction spans are both ordered. Advance once
-            # per span instead of scanning every reconstruction for every
-            # match, including ordinary matches before a spaced instruction.
-            while (
-                reconstruction_index < len(view.reconstructions)
-                and view.reconstructions[reconstruction_index].derived_end <= match.start() + 1
-            ):
+        try:
+            for match in pattern.finditer(matching_text, timeout=timeout):
                 budget.check_runtime()
-                reconstruction_index += 1
-            if reconstruction_index == len(view.reconstructions):
-                break
-            reconstruction = view.reconstructions[reconstruction_index]
-            right = max(match.start() + 1, reconstruction.derived_start + 1)
-            if right < min(match.end(), reconstruction.derived_end):
-                source_offset = view.source_offset(right - 1) + 1
-                if first_offset is None or source_offset < first_offset:
-                    first_offset = source_offset
-                # Later matches cannot precede this pattern's first gap.
-                break
+                # Matches and reconstruction spans are both ordered. Advance
+                # once per span, including ordinary matches before a spaced
+                # instruction, instead of rescanning all provenance per match.
+                while (
+                    reconstruction_index < len(view.reconstructions)
+                    and view.reconstructions[reconstruction_index].derived_end <= match.start() + 1
+                ):
+                    budget.check_runtime()
+                    reconstruction_index += 1
+                if reconstruction_index == len(view.reconstructions):
+                    break
+                reconstruction = view.reconstructions[reconstruction_index]
+                right = max(match.start() + 1, reconstruction.derived_start + 1)
+                if right < min(match.end(), reconstruction.derived_end):
+                    source_offset = view.source_offset(right - 1) + 1
+                    if first_offset is None or source_offset < first_offset:
+                        first_offset = source_offset
+                    # Later matches cannot precede this pattern's first gap.
+                    break
+        except TimeoutError as exc:
+            raise _ArtifactIntegrityResourceLimitError(
+                LedgerReason.RUNTIME_LIMIT,
+                {
+                    "observed_seconds": max(0.0, time.monotonic() - started_at),
+                    "limit_seconds": timeout,
+                },
+            ) from exc
     return get_line_number(content, first_offset) if first_offset is not None else None
 
 

@@ -8,10 +8,11 @@ import io
 import json
 import tarfile
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
+import skillspector.nodes.build_context as build_context_module
 from skillspector.input_handler import InputHandler
 from skillspector.mcp_server import run_scan
 
@@ -40,6 +41,8 @@ def _archive_bytes(*, compressed: bool = False) -> bytes:
         ("notes.md", _archive_bytes(), False),
         ("notes.md", _archive_bytes(compressed=True), False),
         ("notes.md", bz2.compress(_SKILL), False),
+        ("SKILL.md", _SKILL + b"Legacy caf\xe9 text.\n", True),
+        ("notes.md", _SKILL + b"\xff", False),
     ],
     ids=[
         "opaque-file",
@@ -51,6 +54,8 @@ def _archive_bytes(*, compressed: bool = False) -> bytes:
         "renamed-tar",
         "renamed-gzip",
         "renamed-bzip2",
+        "lossy-primary",
+        "lossy-explicit",
     ],
 )
 async def test_unsupported_primary_is_incomplete_and_not_install_safe(
@@ -110,6 +115,71 @@ async def test_supported_zip_remains_complete(tmp_path: Path, layout: str) -> No
 
     assert result["analysis_completeness"]["is_complete"] is True
     assert result["safe_to_install"] is True
+
+
+@pytest.mark.parametrize("extension", ["zip", "dat"])
+@pytest.mark.parametrize("member", ["SKILL.md", "pkg/skill.md", "one/SKILL.md"])
+async def test_zip_instruction_identity_survives_container_boundaries(
+    tmp_path: Path, extension: str, member: str
+) -> None:
+    target = tmp_path / f"bundle.{extension}"
+    with zipfile.ZipFile(target, "w") as archive:
+        archive.writestr(member, _SKILL.decode().encode("utf-16"))
+        archive.writestr(str(PurePosixPath(member).parent / "image.png"), _PNG)
+        if member.startswith("one/"):
+            archive.writestr("two/README.md", "Summarize text.")
+
+    result = await run_scan(str(target), use_llm=False)
+
+    assert result["safe_to_install"] is False
+    assert result["execution_successful"] is False
+    completeness = result["analysis_completeness"]
+    assert completeness["status"] == "failed"
+    assert any(
+        row["reason_code"] == "unsupported_primary_content"
+        and row["path"].endswith(member.rsplit("/", 1)[-1])
+        for row in completeness["ledger_exceptions"]
+    )
+    assert not any(
+        row["path"].endswith(("SKILL.md", "skill.md")) for row in completeness["scope_exclusions"]
+    )
+    assert any(row["path"].endswith("image.png") for row in completeness["scope_exclusions"])
+
+
+async def test_nested_directory_instructions_are_required(tmp_path: Path) -> None:
+    target = tmp_path / "pkg" / "SKILL.md"
+    target.parent.mkdir()
+    target.write_bytes(_PNG)
+
+    result = await run_scan(str(tmp_path), use_llm=False)
+
+    assert result["safe_to_install"] is False
+    assert any(
+        row["path"] == "pkg/SKILL.md" and row["reason_code"] == "unsupported_primary_content"
+        for row in result["analysis_completeness"]["ledger_exceptions"]
+    )
+
+
+@pytest.mark.parametrize("prefix", [b"", _SKILL])
+@pytest.mark.parametrize("limit_name", ["MAX_ANALYZABLE_FILE_BYTES", "MAX_TOTAL_CACHED_BYTES"])
+async def test_utf8_codepoint_split_by_cache_limit_stays_partial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prefix: bytes, limit_name: str
+) -> None:
+    # The cached prefix ends after the first byte of a valid multibyte letter.
+    monkeypatch.setattr(build_context_module, limit_name, len(prefix) + 1)
+    (tmp_path / "SKILL.md").write_bytes(prefix + "é\n".encode())
+
+    result = await run_scan(str(tmp_path), use_llm=False)
+
+    assert result["safe_to_install"] is False
+    assert result["execution_successful"] is True
+    assert result["analysis_completeness"]["status"] == "partial"
+    exceptions = result["analysis_completeness"]["ledger_exceptions"]
+    expected_reason = (
+        "size_limit" if limit_name == "MAX_ANALYZABLE_FILE_BYTES" else "total_bytes_limit"
+    )
+    assert any(row["reason_code"] == expected_reason for row in exceptions)
+    assert not any(row["reason_code"] == "unsupported_primary_content" for row in exceptions)
 
 
 async def test_explicit_text_with_binary_extension_preserves_source_path(tmp_path: Path) -> None:
