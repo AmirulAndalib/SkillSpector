@@ -10,6 +10,7 @@ import io
 import time
 import tracemalloc
 import zipfile
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -1375,9 +1376,18 @@ def test_static_only_graph_surfaces_sanitized_bypass_fixture(
     )
 
 
-def test_missing_primary_reference_blocks_complete_verdict(tmp_path: Path) -> None:
+def test_reported_self_and_existing_file_references_remain_complete(tmp_path: Path) -> None:
+    references = tmp_path / "references"
+    references.mkdir()
+    (references / "windows-host-setup.md").write_text(
+        "# Windows host setup\n\nUse the documented lab defaults.\n",
+        encoding="utf-8",
+    )
     (tmp_path / "SKILL.md").write_text(
-        "# Skill\n\nContinue with [the local guide](missing-guide.md).\n",
+        "# Skill\n\n"
+        "Keep `SKILL.md` concise.\n"
+        "Read [this skill](./SKILL.md) before updating it.\n"
+        "Follow `references/windows-host-setup.md` before setup.\n",
         encoding="utf-8",
     )
 
@@ -1389,13 +1399,139 @@ def test_missing_primary_reference_blocks_complete_verdict(tmp_path: Path) -> No
         }
     )
 
+    resolved_targets = [
+        reference["target_path"]
+        for reference in result["artifact_references"]
+        if reference["status"] == "resolved"
+    ]
+    assert Counter(resolved_targets) == Counter(
+        {
+            "SKILL.md": 2,
+            "references/windows-host-setup.md": 1,
+        }
+    )
     assert not any(finding.rule_id == "AE1" for finding in result["filtered_findings"])
-    assert result["analysis_completeness"]["is_complete"] is False
-    assert any(
+    assert not any(
         row["reason_code"] == "reference_unresolved"
         for row in result["analysis_completeness"]["ledger_exceptions"]
     )
+    assert result["analysis_completeness"]["is_complete"] is True
+    assert result["risk_recommendation"] == "SAFE"
+
+
+@pytest.mark.parametrize("case", ["missing", "ambiguous"])
+def test_unresolved_primary_reference_blocks_complete_verdict(tmp_path: Path, case: str) -> None:
+    reference = "references/windows-host-setup.md" if case == "missing" else "guide.md"
+    if case == "ambiguous":
+        for subdirectory in ("first", "second"):
+            target = tmp_path / "references" / subdirectory / reference
+            target.parent.mkdir(parents=True)
+            target.write_text("# Guide\n", encoding="utf-8")
+    (tmp_path / "SKILL.md").write_text(
+        f"# Skill\n\nContinue with [the local guide]({reference}).\n",
+        encoding="utf-8",
+    )
+
+    result = graph.invoke(
+        {
+            "input_path": str(tmp_path),
+            "output_format": "json",
+            "use_llm": False,
+        }
+    )
+
+    unresolved = [
+        reference
+        for reference in result["artifact_references"]
+        if reference["status"] in {"missing", "ambiguous"}
+    ]
+    assert len(unresolved) == 1
+    assert unresolved[0]["status"] == case
+    assert unresolved[0]["target_path"] is None
+    assert not any(finding.rule_id == "AE1" for finding in result["filtered_findings"])
+    assert result["analysis_completeness"]["is_complete"] is False
+    expected_reason = "reference_missing" if case == "missing" else "reference_unresolved"
+    assert any(
+        row["reason_code"] == expected_reason
+        for row in result["analysis_completeness"]["ledger_exceptions"]
+    )
     assert result["risk_recommendation"] != "SAFE"
+
+
+@pytest.mark.asyncio
+async def test_unresolved_reference_caveat_does_not_block_mcp_install(tmp_path: Path) -> None:
+    """A reference caveat hides no bytes, so it must not fail safe_to_install.
+
+    Same fixture as test_missing_primary_reference_blocks_complete_verdict:
+    is_complete stays False and the recommendation stays non-SAFE, but every
+    discovered file was fully inspected and nothing was hidden from analysis.
+    """
+    (tmp_path / "SKILL.md").write_text(
+        "# Skill\n\nContinue with [the local guide](missing-guide.md).\n",
+        encoding="utf-8",
+    )
+
+    verdict = await run_scan(str(tmp_path), use_llm=False, output_format="json")
+
+    assert verdict["analysis_completeness"]["is_complete"] is False
+    assert verdict["recommendation"] != "SAFE"
+    assert verdict["safe_to_install"] is True
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_reference_caveat_still_blocks_mcp_install(tmp_path: Path) -> None:
+    """An ambiguous reference is unlike a missing one: it must keep blocking.
+
+    The reference matches more than one bundled artifact, so the scanner has
+    not established which bytes the instruction actually reaches. Unlike the
+    missing-reference caveat above, this must not be exempted from
+    safe_to_install.
+    """
+    (tmp_path / "SKILL.md").write_text(
+        "# Skill\n\nContinue with [the local guide](guide.md).\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "guide.md").write_text("docs guide", encoding="utf-8")
+    (tmp_path / "extra").mkdir()
+    (tmp_path / "extra" / "guide.md").write_text("extra guide", encoding="utf-8")
+
+    verdict = await run_scan(str(tmp_path), use_llm=False, output_format="json")
+
+    assert verdict["analysis_completeness"]["is_complete"] is False
+    assert any(
+        row["reason_code"] == "reference_unresolved"
+        for row in verdict["analysis_completeness"]["ledger_exceptions"]
+    )
+    assert verdict["safe_to_install"] is False
+
+
+@pytest.mark.asyncio
+async def test_opaque_referenced_artifact_still_blocks_mcp_install(tmp_path: Path) -> None:
+    """Unlike a reference caveat, a resolved-but-opaque target hides bytes and must block."""
+    (tmp_path / "SKILL.md").write_text(
+        """---
+name: binary-repro
+description: A skill that ships one small PNG as reference material.
+---
+
+# Binary repro
+
+Describe the diagram in assets/diagram.png to the user.
+""",
+        encoding="utf-8",
+    )
+    png = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    )
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    (assets / "diagram.png").write_bytes(png)
+
+    verdict = await run_scan(str(tmp_path), use_llm=False, output_format="json")
+
+    assert verdict["analysis_completeness"]["is_complete"] is False
+    assert verdict["safe_to_install"] is False
 
 
 def test_normalized_view_findings_remain_primary() -> None:

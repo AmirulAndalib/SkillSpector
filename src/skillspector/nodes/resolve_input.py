@@ -27,6 +27,7 @@ from pathlib import Path
 from skillspector.input_handler import (
     InputHandler,
     TransitiveIngestTruncatedError,
+    selected_source_identity_for_input,
     validate_local_input_path,
 )
 from skillspector.logging_config import get_logger
@@ -58,12 +59,18 @@ def resolve_input(state: SkillspectorState) -> dict[str, object]:
         handler = InputHandler(transitive_budget=workflow_budget)
         try:
             resolved, source_type = handler.resolve(input_path.strip())
+            temp_dir = handler.temp_dir_for_cleanup()
             update: dict[str, object] = {
                 "skill_path": str(resolved),
                 "primary_file_path": handler.primary_file_path,
+                "selected_source_identity": selected_source_identity_for_input(
+                    input_path.strip(),
+                    source_type=source_type,
+                    resolved_path=resolved,
+                    temp_dir=temp_dir,
+                ),
                 "workflow_resource_budget": workflow_budget,
             }
-            temp_dir = handler.temp_dir_for_cleanup()
             if temp_dir is not None:
                 update["temp_dir_for_cleanup"] = str(temp_dir)
             else:
@@ -89,6 +96,7 @@ def resolve_input(state: SkillspectorState) -> dict[str, object]:
             return {
                 "skill_path": str(resolved),
                 "primary_file_path": None,
+                "selected_source_identity": resolved.name or None,
                 "temp_dir_for_cleanup": None,
                 "workflow_resource_budget": workflow_budget,
             }
@@ -97,6 +105,7 @@ def resolve_input(state: SkillspectorState) -> dict[str, object]:
             return {
                 "skill_path": None,
                 "primary_file_path": None,
+                "selected_source_identity": None,
                 "temp_dir_for_cleanup": None,
                 "workflow_resource_budget": workflow_budget,
             }
@@ -104,6 +113,7 @@ def resolve_input(state: SkillspectorState) -> dict[str, object]:
     return {
         "skill_path": None,
         "primary_file_path": None,
+        "selected_source_identity": None,
         "temp_dir_for_cleanup": None,
         "workflow_resource_budget": workflow_budget,
     }
