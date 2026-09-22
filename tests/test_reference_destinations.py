@@ -35,6 +35,9 @@ from skillspector.references import resolve_bundle_references_with_metadata
         ("Read [guide][manual].\n\n[manual]: <docs/user guide.md>", "docs/user guide.md"),
         ("Read [guide][manual].\n\n[manual]: docs/guide(v1).md", "docs/guide(v1).md"),
         ("Read [guide](docs/part%23one.md#summary).", "docs/part#one.md"),
+        ('[guide](docs/guide.md "see [sample](missing.md)")', "docs/guide.md"),
+        ('[guide](docs/guide.md "missing.md")', "docs/guide.md"),
+        ('[guide]: docs/guide.md "see docs/missing.md"', "docs/guide.md"),
         ("Read [guide](docs/part%3Fone.md?view=1).", "docs/part?one.md"),
         ("Read [guide](docs/part%252Fone.md).", "docs/part%2Fone.md"),
         ("Read [guide](docs/caf%C3%A9.md).", "docs/café.md"),
@@ -99,6 +102,9 @@ def test_reference_definitions_do_not_restore_slash_prose_false_positives(tmp_pa
         (r"Read [manual](\<tool.1\>).", "<tool.1>"),
         ("Read [guide](docs/guide(v1).md).", "docs/guide(v1).md"),
         ("Read [guide](docs/part%23one.md#summary).", "docs/part#one.md"),
+        ('[guide](docs/guide.md "see [sample](missing.md)")', "docs/guide.md"),
+        ('[guide](docs/guide.md "missing.md")', "docs/guide.md"),
+        ('[guide]: docs/guide.md "see docs/missing.md"', "docs/guide.md"),
     ],
 )
 async def test_cli_and_mcp_reference_completeness_agree(
@@ -122,7 +128,9 @@ async def test_cli_and_mcp_reference_completeness_agree(
         report = json.loads(result.stdout)
     else:
         result = await run_scan(str(tmp_path), use_llm=False, output_format="json")
-        assert result["safe_to_install"] is present
+        # MCP keeps missing-reference-only caveats install-eligible while the
+        # rendered report still exposes the incomplete analysis.
+        assert result["safe_to_install"] is True
         report = json.loads(result["report"])
     assert report["execution_successful"] is True
     assert report["analysis_completeness"]["is_complete"] is present
@@ -222,3 +230,81 @@ def test_malformed_markdown_openings_observe_deadline_before_yield(
     assert "runtime" in result.limitations
     assert result.complete is False
     assert observed <= 2001
+
+
+@pytest.mark.parametrize(
+    "template", ["[guide]({})", "[guide](<{}>)", "[guide]: {}", "[guide]: <{}>"]
+)
+@pytest.mark.parametrize("length", [511, 512, 513])
+def test_destination_length_limit_is_reported(tmp_path: Path, template: str, length: int) -> None:
+    destination = "a%20/" * 100 + "x" * (length - 503) + ".md"
+    result = resolve_bundle_references_with_metadata(
+        tmp_path,
+        source_path="SKILL.md",
+        source_text=template.format(destination),
+        known_paths=["SKILL.md"],
+    )
+    assert result.complete is (length <= 512)
+    if length > 512:
+        assert "markdown_destination" in result.limitations
+    else:
+        assert len(result.records) == 1
+        assert result.records[0]["status"] == "missing"
+
+
+@pytest.mark.parametrize("template", ['[guide](docs/a%20b.md "{}")', '[guide]: docs/a%20b.md "{}"'])
+def test_title_length_limit_is_reported(tmp_path: Path, template: str) -> None:
+    result = resolve_bundle_references_with_metadata(
+        tmp_path,
+        source_path="SKILL.md",
+        source_text=template.format("a" * 513),
+        known_paths=["SKILL.md"],
+    )
+    assert result.complete is False
+    assert "markdown_title" in result.limitations
+
+
+@pytest.mark.parametrize("template", ['[guide](docs/guide.md "{}")', '[guide]: docs/guide.md "{}"'])
+@pytest.mark.parametrize("title", ["see [sample](missing.md)", "missing.md", "see docs/missing.md"])
+def test_title_text_is_not_a_reference(tmp_path: Path, template: str, title: str) -> None:
+    result = resolve_bundle_references_with_metadata(
+        tmp_path,
+        source_path="SKILL.md",
+        source_text=template.format(title) + "\n[other](docs/other.md)",
+        known_paths=["SKILL.md", "docs/guide.md", "docs/other.md"],
+    )
+    assert result.complete is True
+    assert [record["target_path"] for record in result.records] == [
+        "docs/guide.md",
+        "docs/other.md",
+    ]
+
+
+@pytest.mark.parametrize("channel", ["cli", "mcp"])
+@pytest.mark.parametrize(
+    "body",
+    [
+        "[guide]: " + "/".join(["a%20b"] * 90) + ".md",
+        "[guide](<" + "a /" * 180 + "guide.md>)",
+        '[guide](docs/a%20b.md "' + "a" * 513 + '")',
+    ],
+)
+async def test_markdown_limits_block_complete_verdict(
+    tmp_path: Path, body: str, channel: str
+) -> None:
+    (tmp_path / "SKILL.md").write_text(
+        "---\nname: reference-control\ndescription: Summarize the guide.\n---\n" + body + "\n",
+        encoding="utf-8",
+    )
+    if channel == "cli":
+        result = CliRunner().invoke(
+            app, ["scan", str(tmp_path), "--no-llm", "--format", "json", "--fail-on-incomplete"]
+        )
+        assert result.exit_code == 1, result.output
+        report = json.loads(result.stdout)
+    else:
+        result = await run_scan(str(tmp_path), use_llm=False, output_format="json")
+        assert result["safe_to_install"] is False
+        report = json.loads(result["report"])
+    assert report["execution_successful"] is True
+    assert report["analysis_completeness"]["is_complete"] is False
