@@ -271,3 +271,108 @@ async def test_downloaded_file_keeps_primary_identity_but_zip_members_are_passiv
             item["path"] == "notes.md" and item["reason_code"] == "unsupported_primary_content"
             for item in result["analysis_completeness"]["ledger_exceptions"]
         )
+
+
+@pytest.mark.parametrize("limit", [1, 12])
+@pytest.mark.parametrize("cap", ["bundle", "workflow"])
+@pytest.mark.parametrize(
+    "content",
+    [_SKILL.decode().encode("utf-16"), b"---\nname: [unterminated\n---\nHello\xff"],
+    ids=["utf16", "invalid-utf8-and-manifest"],
+)
+async def test_primary_failure_survives_ledger_overflow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, limit: int, cap: str, content: bytes
+) -> None:
+    from typer.testing import CliRunner
+
+    import skillspector.state as state_module
+    from skillspector.cli import app
+
+    if cap == "bundle":
+        monkeypatch.setattr(build_context_module, "MAX_BUNDLE_LEDGER_EVENTS", limit)
+    else:
+        monkeypatch.setattr(state_module, "MAX_INSPECTION_LEDGER_EVENTS", limit)
+    (tmp_path / "SKILL.md").write_bytes(content)
+    excluded = tmp_path / "node_modules" / "example"
+    excluded.mkdir(parents=True)
+    for index in range(10):
+        (excluded / f"{index}.py").write_text("pass\n", encoding="utf-8")
+
+    result = await run_scan(str(tmp_path), use_llm=False)
+
+    assert result["execution_successful"] is False
+    assert result["safe_to_install"] is False
+    completeness = result["analysis_completeness"]
+    assert completeness["status"] == "failed"
+    assert any(
+        row["path"] == "SKILL.md"
+        and row["reason_code"] == "unsupported_primary_content"
+        and row["fatal"]
+        for row in completeness["ledger_exceptions"]
+    )
+    cli = CliRunner().invoke(app, ["scan", str(tmp_path), "--no-llm", "--format", "json"])
+    assert cli.exit_code == 2, cli.output
+
+
+@pytest.mark.parametrize("extension", ["zip", "dat"])
+async def test_supported_zip_instruction_member_remains_complete(
+    tmp_path: Path, extension: str
+) -> None:
+    inner = io.BytesIO()
+    with zipfile.ZipFile(inner, "w") as archive:
+        archive.writestr("notes.md", _SKILL)
+    target = tmp_path / f"bundle.{extension}"
+    with zipfile.ZipFile(target, "w") as archive:
+        archive.writestr("pkg/SKILL.md", inner.getvalue())
+
+    result = await run_scan(str(target), use_llm=False)
+
+    assert result["execution_successful"] is True
+    assert result["analysis_completeness"]["is_complete"] is True
+    assert result["safe_to_install"] is True
+
+
+@pytest.mark.parametrize("extension", ["docx", "xlsx", "pptx"])
+async def test_archive_extension_does_not_hide_unsupported_primary_bytes(
+    tmp_path: Path, extension: str
+) -> None:
+    target = tmp_path / f"notes.{extension}"
+    target.write_bytes(_SKILL.decode().encode("utf-16"))
+
+    result = await run_scan(str(target), use_llm=False)
+
+    assert result["execution_successful"] is False
+    assert result["analysis_completeness"]["status"] == "failed"
+    assert any(
+        row["reason_code"] == "unsupported_primary_content" and row["fatal"]
+        for row in result["analysis_completeness"]["ledger_exceptions"]
+    )
+
+
+@pytest.mark.parametrize("failure", ["malformed", "depth_limit"])
+async def test_recognized_nested_zip_keeps_archive_failure_accounting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    import skillspector.nested_artifacts as nested_module
+
+    inner = io.BytesIO()
+    with zipfile.ZipFile(inner, "w") as archive:
+        archive.writestr("notes.md", _SKILL)
+    content = inner.getvalue()
+    if failure == "malformed":
+        content = b"PK\x03\x04truncated"
+        expected_reason = "archive_truncated"
+    else:
+        monkeypatch.setattr(nested_module, "ARCHIVE_MAX_DEPTH", 1)
+        expected_reason = "archive_depth_limit"
+    target = tmp_path / "bundle.dat"
+    with zipfile.ZipFile(target, "w") as archive:
+        archive.writestr("pkg/SKILL.md", content)
+
+    result = await run_scan(str(target), use_llm=False)
+
+    assert result["safe_to_install"] is False
+    assert result["analysis_completeness"]["is_complete"] is False
+    reasons = {row["reason_code"] for row in result["analysis_completeness"]["ledger_exceptions"]}
+    assert expected_reason in reasons
+    assert "unsupported_primary_content" not in reasons

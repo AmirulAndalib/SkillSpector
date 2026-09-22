@@ -888,6 +888,33 @@ def finalize_ledger(state: Mapping[str, object]) -> tuple[AnalysisCompleteness, 
     ]
     exceptional_rows.extend(unaccounted_exceptions)
     exceptional_rows.extend(accounting_exceptions)
+    raw_inventory = state.get("artifact_inventory", [])
+    inventory = (
+        [item for item in raw_inventory if isinstance(item, dict)]
+        if isinstance(raw_inventory, list)
+        else []
+    )
+    fatal_reasons = {
+        (row["path"], row["reason_code"]) for row in exceptional_rows if row.get("fatal")
+    }
+    # The bounded detail ledger may omit a cache failure. Canonical inventory
+    # still owns the artifact's disposition: truncation cannot restore success.
+    for artifact in inventory:
+        if artifact.get("disposition") != "failed":
+            continue
+        path = _safe_path(artifact.get("path"), components)
+        reason = _reason(artifact.get("reason"), LedgerReason.READ_ERROR)
+        if (path, reason) not in fatal_reasons:
+            exceptional_rows.append(
+                _exception(
+                    outcome=LedgerOutcome.FAILED,
+                    phase="cache",
+                    reason=reason,
+                    path=path,
+                    fatal=True,
+                )
+            )
+            fatal_reasons.add((path, reason))
     ledger_exceptions = _merge_exception_projection(exceptional_rows)
     scope_exclusions = _merge_exception_projection(scope_rows)
 
@@ -913,12 +940,6 @@ def finalize_ledger(state: Mapping[str, object]) -> tuple[AnalysisCompleteness, 
                 LedgerOutcome.FAILED if component in cache_failures else LedgerOutcome.COMPLETED
             )
 
-    raw_inventory = state.get("artifact_inventory", [])
-    inventory = (
-        [item for item in raw_inventory if isinstance(item, dict)]
-        if isinstance(raw_inventory, list)
-        else []
-    )
     disposition_by_path = {
         str(item.get("path", "")): str(item.get("disposition", "")) for item in inventory
     }

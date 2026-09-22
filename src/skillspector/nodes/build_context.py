@@ -3139,7 +3139,7 @@ def build_context(state: SkillspectorState) -> dict[str, object]:
             "SKILL.md",
             "skill.md",
         }
-        if not required or path in recognized_containers:
+        if not required or path in nested.recognized_zip_paths:
             continue
         data = raw_file_cache.get(path)
         if data is None or not _unsupported_primary_bytes(artifact, data):
@@ -3191,6 +3191,10 @@ def build_context(state: SkillspectorState) -> dict[str, object]:
         manifest_reason = manifest_events[-1].get("reason_code", LedgerReason.MANIFEST_PARSE_LIMIT)
         for artifact in artifact_inventory:
             if artifact["path"] == primary_path:
+                # Manifest interpretation cannot downgrade a byte/read failure.
+                # Inventory must retain fatality even if ledger details are capped.
+                if artifact["disposition"] == ArtifactDisposition.FAILED:
+                    break
                 artifact["disposition"] = ArtifactDisposition.PARTIAL
                 artifact["reason"] = (
                     manifest_reason.value

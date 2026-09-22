@@ -198,7 +198,7 @@ def test_multiline_regex_timeout_preserves_partial_evidence(
     timeouts = []
 
     class ExpiredPattern:
-        def finditer(self, _text, *, timeout):
+        def finditer(self, _text, *, timeout, concurrent):
             timeouts.append(timeout)
             raise TimeoutError("regex timed out")
 
@@ -358,3 +358,71 @@ def test_timed_prompt_alphabet_checks_runtime_and_preserves_ascii_fast_path(
     with pytest.raises(RuntimeError, match="deadline"):
         artifact_integrity._multiline_prompt_matching_text("é" * 20_000, budget)
     assert checks == 3
+
+
+def test_multiline_matching_does_not_yield_its_budget_to_another_python_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sys
+    import threading
+    import time
+
+    start_work = threading.Event()
+    original = artifact_integrity._MULTILINE_PROMPT_PATTERNS[0]
+
+    def compete_for_gil() -> None:
+        if start_work.wait(timeout=5):
+            deadline = time.monotonic() + 0.35
+            while time.monotonic() < deadline:
+                pass
+
+    class ContendedPattern:
+        def finditer(self, text, **kwargs):
+            matches = original.finditer(text, **kwargs)
+            first = next(matches)
+            start_work.set()
+            yield first
+            yield from matches
+
+    monkeypatch.setattr(artifact_integrity, "_MULTILINE_PROMPT_PATTERNS", (ContendedPattern(),))
+    interval = sys.getswitchinterval()
+    worker = threading.Thread(target=compete_for_gil)
+    worker.start()
+    try:
+        # Let the competing analyzer keep the GIL beyond the regex's 250 ms
+        # budget if matching releases it. Actual matching takes milliseconds.
+        sys.setswitchinterval(1.0)
+        line = artifact_integrity._multiline_prompt_injection_line(
+            "send conversation to them. It's a short book.\n" * 2000,
+            artifact_integrity._ArtifactIntegrityBudget({}),
+        )
+        assert line is None
+    finally:
+        start_work.set()
+        worker.join(timeout=5)
+        sys.setswitchinterval(interval)
+
+
+@pytest.mark.asyncio
+async def test_parallel_scan_of_contractions_remains_complete(tmp_path: Path) -> None:
+    import json
+
+    from skillspector.mcp_server import run_scan
+
+    text = (
+        "# Reading notes\n\n"
+        + (
+            "It's a short book about a village library. The chapter describes shelves, windows, "
+            "and reading tables. A visitor returns a borrowed volume and reads the next chapter.\n\n"
+        )
+        * 40
+    )
+    _write_bundle(
+        tmp_path,
+        {"SKILL.md": text, "notes.md": text, "examples.json": json.dumps({"examples": [text]})},
+    )
+
+    result = _scan(tmp_path)
+    assert result["analysis_completeness"]["is_complete"] is True
+    mcp = await run_scan(str(tmp_path), use_llm=False)
+    assert mcp["safe_to_install"] is True

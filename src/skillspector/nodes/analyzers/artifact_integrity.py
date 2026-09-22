@@ -770,7 +770,10 @@ def _multiline_prompt_injection_line(
         started_at = time.monotonic()
         reconstruction_index = 0
         try:
-            for match in pattern.finditer(matching_text, timeout=timeout):
+            # Keep this short, interruptible search on the current thread.
+            # Releasing the GIL lets another analyzer consume its wall-clock
+            # allowance and turn ordinary prose into a false timeout.
+            for match in pattern.finditer(matching_text, timeout=timeout, concurrent=False):
                 budget.check_runtime()
                 # Matches and reconstruction spans are both ordered. Advance
                 # once per span, including ordinary matches before a spaced
